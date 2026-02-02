@@ -45,6 +45,21 @@ def build_ftp_path(database, accession_full):
     return path
 
 
+def build_accession_path(assembly_dir):
+    """
+    Build the NCBI path for a given assembly directory.
+    e.g., GCA_000195005.1_MyRecordDescription -> GCA/000/195/005/GCA_000195005.1_MyRecordDescription/
+    """
+    match = re.match(r'GC[AF]_(\d{3})(\d{3})(\d{3})\.\d+.*', assembly_dir)
+    if not match:
+        raise ValueError(f"Cannot parse accession: {assembly_dir}")
+    
+    part1, part2, part3 = match.groups()
+    path = f"{assembly_dir[0:3]}/{part1}/{part2}/{part3}/{assembly_dir}/"
+    
+    return path
+
+
 def find_assembly_dir(ftp, base_path, accession_full):
     """
     Find the actual assembly directory (with assembly name suffix).
@@ -78,6 +93,7 @@ file_filters = [
     '_assembly_regions.txt',
     '_assembly_report.txt',
     '_assembly_stats.txt',
+    '_gene_expression_counts.txt.gz',
     '_normalized_gene_expression_counts.txt.gz',
 ]
 
@@ -86,10 +102,6 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
     Download files according to file_filters for a given accession.
     """
     _, database, accession_full = parse_accession(entry)
-    
-    # Create local directory
-    local_dir = Path(output_dir) / entry.strip()
-    local_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\nProcessing: {entry}")
     print(f"  Accession: {accession_full}")
@@ -105,6 +117,11 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
         
         assembly_dir = find_assembly_dir(ftp, base_path, accession_full)
         print(f"  Assembly dir: {assembly_dir}")
+
+        local_dir = build_accession_path(assembly_dir)
+        local_dir = Path(output_dir) / local_dir
+        local_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Local dir: {local_dir}")
         
         full_path = base_path + assembly_dir
         ftp.cwd(full_path)

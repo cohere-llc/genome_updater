@@ -58,12 +58,12 @@ python3 download_genomes.py example_list.txt ./my-folder
 The contents of my folder would look like this:
 ```
 |- my-folder/
-   |- GB_GCA_000195005.1/
-   |- GB_GCA_000408925.1/
-   |- GB_GCA_000410835.1/
-   |- GB_GCA_000452465.2/
-   |- GB_GCA_000682095.1/
-   |- RS_GCF_000006825.1/
-   |- RS_GCF_000007865.1/
-   |- RS_GCF_000008205.1/
+   |- GCA/000/195/005/GCA_000195005.1_foobar/
+   |- GCA/000/408/925/GCA_000408925.1_barbaz/
+   |- GCA/000/410/835/GCA_000410835.1_bazqux/
+   |- GCA/000/425/465/GCA_000452465.2_quxquux/
+   |- GCA/000/682/095/GCA_000682095.1_quuxcorge/
+   |- GCF/000/006/825/GCF_000006825.1_corge/
+   |- GCF/000/007/865/GCF_000007865.1_quux/
+   |- GCF/000/008/205/GCF_000008205.1_qux/
    ```
