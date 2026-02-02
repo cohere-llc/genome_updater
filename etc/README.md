@@ -16,7 +16,7 @@ Each entry in the text file is in the form:
 
 The path to a specific folder's files is:
 ```
-ftp://ftp.ncbi.nlm.nih.gov/genomes/all/{DATABASE}/{PART1}/{PART2}/{PART3}/{RECORD}_SomeLabelText
+ftp://ftp.ncbi.nlm.nih.gov/genomes/all/{DATABASE}/{PART1}/{PART2}/{PART3}/{DATABASE}_{ID}.{RECORD}_SomeLabelText
 ```
 The text after `{RECORD}_` describes the record in some way, but only the integer record index is used in the query (this assumes one sub-folder per record id, which seems to be the case).
 
