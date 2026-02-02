@@ -69,11 +69,23 @@ def find_assembly_dir(ftp, base_path, accession_full):
         raise Exception(f"Error finding assembly directory: {e}")
 
 
+file_filters = [
+    '_gene_ontology.gaf.gz',
+    '_genomic.fna.gz',
+    '_genomic.gff.gz',
+    '_protein.faa.gz',
+    '_ani_contam_ranges.tsv',
+    '_assembly_regions.txt',
+    '_assembly_report.txt',
+    '_assembly_stats.txt',
+    '_normalized_gene_expression_counts.txt.gz',
+]
+
 def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
     """
-    Download .fna.gz and .gff.gz files for a given accession.
+    Download files according to file_filters for a given accession.
     """
-    prefix, database, accession_full = parse_accession(entry)
+    _, database, accession_full = parse_accession(entry)
     
     # Create local directory
     local_dir = Path(output_dir) / entry.strip()
@@ -101,11 +113,11 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
         files = []
         ftp.retrlines('NLST', lambda x: files.append(x))
         
-        # Filter for .fna.gz and .gff.gz files
-        target_files = [f for f in files if f.endswith('_genomic.fna.gz') or f.endswith('_genomic.gff.gz')]
+        # Filter for files based on file_filters
+        target_files = [f for f in files if any(f.endswith(suffix) for suffix in file_filters)]
         
         if not target_files:
-            print(f"  WARNING: No .fna.gz or .gff.gz files found")
+            print(f"  WARNING: No files matching filters found")
             return
         
         # Download files

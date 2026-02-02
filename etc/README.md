@@ -9,7 +9,7 @@ Each entry in the text file is in the form:
 ```
 {PREFIX}_{TYPE}_{ID}.{RECORD}
 ```
-- `PREFIX`: Either `GB` (GenBank? GTDB?) or `RS` (RefSeek?). This is ignored in the query
+- `PREFIX`: Either `GB` (GenBank) or `RS` (RefSeq). This is ignored in the query
 - `DATABASE`: Either `GCA` (Seems to correspond to `GB` records?) or `GCF` (`RS` records?)
 - `ID`: Nine digit ID, split into three, 3-digit parts for the query: `PART1`, `PART2`, `PART3`
 - `RECORD`: Integer used to identify specific subfolders in the `ID` record. Starts at 1, goes up to the number of subfolders
@@ -32,9 +32,25 @@ RS_GCF_000007865.1
 RS_GCF_000008205.1
 ```
 
+Only a subset of the files in each record subfolder are downloaded, following this logic:
+
+| Filter | Database | Format | Description |
+|--------|----------|--------|-------------|
+| `*_gene_ontology.gaf.gz` | `R` | GO Annotation File (GAF) | Gene Ontology (GO) annotation of the annotated genes. |
+| `*_genomic.fna.gz` | `D/G/R` | FASTA | Genomic sequence(s) in the assembly. Repetitive sequences in eukaryotes are masked to lower-case. |
+| `*_genomic.gff.gz` | `D/G/R` | GFF3 | Annotation of the genomic sequence(s). |
+| `*_protein.faa.gz` | `D/G/R` | FASTA | Sequences of accessioned protein products annotated on the genome assembly. |
+| `*_ani_contam_ranges.tsv` | `G/R` | Tab-delimited text | Reports potentially contaminated regions in the assembly identified based on Average Nucleotide Identity (ANI). |
+| `assembly_*.txt` | `G/R` | Tab-delimited text | Assembly reports and statistics |
+| `*_normalized_gene_expression_counts.txt.gz` | `R` | Tab-delimited text | Reports normalized counts (TPM) of RNA-seq reads mapped to each gene. |
+
+* `D`: Datasets available on NCBI Datasets site
+* `G`: GenBank
+* `R`: RefSeq
+
 The local folder will be created, if it doesn't exist.
 
-Example usage:
+## Example usage
 ```
 python3 download_genomes.py example_list.txt ./my-folder
 ```
