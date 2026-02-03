@@ -50,6 +50,15 @@ Only a subset of the files in each record subfolder are downloaded, following th
 
 The local folder will be created, if it doesn't exist.
 
+## Install Dependencies and Run Tests
+
+```bash
+./setup_venv.sh
+source venv/bin/activate
+python3 -m unittest minio_client_test.py -v
+python3 download_genomes.py test_list.txt
+```
+
 ## Example usage
 ```
 python3 download_genomes.py example_list.txt ./my-folder
