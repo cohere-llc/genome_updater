@@ -9,6 +9,31 @@ import re
 from ftplib import FTP
 from pathlib import Path
 import time
+import tempfile
+
+from minio_client import MinioClient
+
+minio_bucket = "cdm-lake"
+minio_path_prefix = "tenant-general-warehouse/kbase/datasets/ncbi/"
+
+def get_minio_client():
+    """
+    Initialize and return MinioClient.
+    """
+    client = MinioClient()
+
+    # Ensure bucket exists
+    buckets = client.list_buckets()
+    if minio_bucket not in buckets:
+        raise Exception(f"MinIO bucket '{minio_bucket}' does not exist.")
+    
+    # Ensure path prefix exists (not strictly necessary for MinIO/S3, but for sanity check)
+    objects = client.list_objects(minio_bucket, prefix=minio_path_prefix)
+    if not any(objects):
+        raise Exception(f"MinIO path prefix '{minio_path_prefix}' does not exist in bucket '{minio_bucket}'.")
+
+    return client
+
 
 
 def parse_accession(entry):
@@ -55,7 +80,7 @@ def build_accession_path(assembly_dir):
         raise ValueError(f"Cannot parse accession: {assembly_dir}")
     
     part1, part2, part3 = match.groups()
-    path = f"{assembly_dir[0:3]}/{part1}/{part2}/{part3}/{assembly_dir}/"
+    path = f"raw_data/{assembly_dir[0:3]}/{part1}/{part2}/{part3}/{assembly_dir}/"
     
     return path
 
@@ -97,14 +122,18 @@ file_filters = [
     '_normalized_gene_expression_counts.txt.gz',
 ]
 
-def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
+def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
     """
     Download files according to file_filters for a given accession.
     """
     _, database, accession_full = parse_accession(entry)
     
+    # Ensure local_dir is a Path object
+    local_dir = Path(local_dir)
+    
     print(f"\nProcessing: {entry}")
     print(f"  Accession: {accession_full}")
+    print(f"  Local temporary dir: {local_dir}")
     
     # Connect to FTP
     ftp = FTP(ftp_host)
@@ -118,10 +147,8 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
         assembly_dir = find_assembly_dir(ftp, base_path, accession_full)
         print(f"  Assembly dir: {assembly_dir}")
 
-        local_dir = build_accession_path(assembly_dir)
-        local_dir = Path(output_dir) / local_dir
-        local_dir.mkdir(parents=True, exist_ok=True)
-        print(f"  Local dir: {local_dir}")
+        s3_path = minio_path_prefix + build_accession_path(assembly_dir)
+        print(f"  S3 path: {s3_path}")
         
         full_path = base_path + assembly_dir
         ftp.cwd(full_path)
@@ -145,7 +172,12 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
             with open(local_file, 'wb') as f:
                 ftp.retrbinary(f'RETR {filename}', f.write)
             
-            print(f"    Saved to: {local_file}")
+            s3_client.upload_file(
+                minio_bucket,
+                s3_path + filename,
+                str(local_file)
+            )
+            print(f"    Uploaded to MinIO: {s3_path + filename}")
         
         print(f"  ✓ Downloaded {len(target_files)} files")
     
@@ -158,13 +190,12 @@ def download_genome_files(entry, output_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python download_genomes.py <accession_list_file> [output_dir]")
-        print("\nExample: python download_genomes.py list_of_accessions.txt ./genomes")
+    if len(sys.argv) < 1:
+        print("Usage: python download_genomes.py <accession_list_file>")
+        print("\nExample: python download_genomes.py list_of_accessions.txt")
         sys.exit(1)
     
     input_file = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else './genomes'
     
     if not os.path.exists(input_file):
         print(f"Error: File not found: {input_file}")
@@ -175,7 +206,12 @@ def main():
         accessions = [line.strip() for line in f if line.strip()]
     
     print(f"Found {len(accessions)} accessions to process")
-    print(f"Output directory: {output_dir}")
+
+    # Initialize MinIO client and check bucket/path
+    s3 = get_minio_client()
+
+    # Create a temporary folder for downloads
+    temp_dir = tempfile.TemporaryDirectory()
     
     # Process each accession
     success_count = 0
@@ -184,7 +220,7 @@ def main():
     for i, entry in enumerate(accessions, 1):
         try:
             print(f"\n[{i}/{len(accessions)}]", end=' ')
-            download_genome_files(entry, output_dir)
+            download_genome_files(entry, s3, temp_dir.name)
             success_count += 1
             time.sleep(0.5)  # Be nice to NCBI servers
         
