@@ -166,6 +166,12 @@ def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.ni
         
         # Download files
         for filename in target_files:
+            # First make sure the file does not already exist in MinIO
+            existing_objects = s3_client.list_objects(minio_bucket, prefix=s3_path + filename)
+            if existing_objects:
+                print(f"  Skipping existing file in MinIO: {filename}")
+                continue
+
             local_file = local_dir / filename
             print(f"  Downloading: {filename}")
             
