@@ -1,9 +1,8 @@
 # NCBI File Transfer Script
 
 The python script in this folder downloads files from `ftp.ncbi.nlm.nih.gov`. The script
-takes two arguments:
+takes argument:
 - a path to a text file containing a list of genome records to download
-- a path to the local folder to store the downloaded records
 
 Each entry in the text file is in the form:
 ```
@@ -48,9 +47,31 @@ Only a subset of the files in each record subfolder are downloaded, following th
 * `G`: GenBank
 * `R`: RefSeq
 
-The local folder will be created, if it doesn't exist.
+The script uses a temporary local folder for staging files prior to uploading them to a MinIO instance. By default,
+the script expects a running MinIO instance set up for testing (see below). If the following environment variables
+are set, they will be used as credentials (making it usable in the lakehouse for real transfers):
+- `MINIO_ACCESS_KEY`
+- `MINIO_SECRET_KEY`
+- `MINIO_ENDPOINT_URL`
+
+The script expects the bucket `cdm-lake` to exist and the path `tenant-general-warehouse/kbase/datasets/ncbi/` to contain at
+least one file or subfolder.
 
 ## Install Dependencies and Run Tests
+
+### MinIO Test Server
+
+Set up a local MinIO server if testing locally (requires docker or podman)
+```bash
+docker run -p 9000:9000 -p 9001:9001 -e "MINIO_ROOT_USER=minioadmin" -e "MINIO_ROOT_PASSWORD=minioadmin" -d minio/minio server /data --console-address ":9001"
+```
+
+Now, navigate to `http://localhost:9001`, log in with the user name and password (both `minioadmin`) and add
+the `cdm-lake` bucket and upload a small file to `cdm-lake:tenant-general-warehouse/kbase/datasets/ncbi/`
+
+### Run the script
+
+The `test_list.txt` file contains 8 record set IDs and can be used to test the transfer script.
 
 ```bash
 ./setup_venv.sh
@@ -61,10 +82,10 @@ python3 download_genomes.py test_list.txt
 
 ## Example usage
 ```
-python3 download_genomes.py example_list.txt ./my-folder
+python3 download_genomes.py example_list.txt
 ```
 
-The contents of my folder would look like this:
+The contents of my folder`cdm-lake:tenant-general-warehouse/kbase/datasets/ncbi/raw_data/` would look like this:
 ```
 |- my-folder/
    |- GCA/000/195/005/GCA_000195005.1_foobar/
