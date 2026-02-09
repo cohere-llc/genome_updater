@@ -63,7 +63,7 @@ least one file or subfolder.
 
 Set up a local MinIO server if testing locally (requires docker or podman)
 ```bash
-docker run -p 9000:9000 -p 9001:9001 -e "MINIO_ROOT_USER=minioadmin" -e "MINIO_ROOT_PASSWORD=minioadmin" -d minio/minio server /data --console-address ":9001"
+docker run -p 9000:9000 -p 9001:9001 -e "MINIO_ROOT_USER=minioadmin" -e "MINIO_ROOT_PASSWORD=minioadmin" -d docker.io/minio/minio server /data --console-address ":9001"
 ```
 
 Now, navigate to `http://localhost:9001`, log in with the user name and password (both `minioadmin`) and add

@@ -10,11 +10,45 @@ from ftplib import FTP
 from pathlib import Path
 import time
 import tempfile
+import hashlib
+import logging
+from datetime import datetime
 
 from minio_client import MinioClient
 
 minio_bucket = "cdm-lake"
 minio_path_prefix = "tenant-general-warehouse/kbase/datasets/ncbi/"
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+def setup_logging(log_file=None):
+    """
+    Set up logging to file and console.
+    """
+    if log_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = f"download_genomes_{timestamp}.log"
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    
+    # Configure logger
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return log_file
 
 def get_minio_client():
     """
@@ -122,7 +156,34 @@ file_filters = [
     '_normalized_gene_expression_counts.txt.gz',
 ]
 
-def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.nih.gov'):
+def compute_md5(file_path):
+    """
+    Compute MD5 checksum of a file.
+    """
+    md5_hash = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            md5_hash.update(chunk)
+    return md5_hash.hexdigest()
+
+
+def parse_md5checksums(content):
+    """
+    Parse md5checksums.txt content.
+    Returns dict of {filename: checksum}
+    """
+    checksums = {}
+    for line in content.strip().split('\n'):
+        if line.strip():
+            parts = line.split()
+            if len(parts) >= 2:
+                checksum = parts[0]
+                filename = parts[1].lstrip('./')
+                checksums[filename] = checksum
+    return checksums
+
+
+def download_genome_files(entry, s3_client, local_dir, failed_transfers, no_checksum_files, ftp_host='ftp.ncbi.nlm.nih.gov'):
     """
     Download files according to file_filters for a given accession.
     """
@@ -131,9 +192,9 @@ def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.ni
     # Ensure local_dir is a Path object
     local_dir = Path(local_dir)
     
-    print(f"\nProcessing: {entry}")
-    print(f"  Accession: {accession_full}")
-    print(f"  Local temporary dir: {local_dir}")
+    logger.info(f"\nProcessing: {entry}")
+    logger.info(f"  Accession: {accession_full}")
+    logger.debug(f"  Local temporary dir: {local_dir}")
     
     # Connect to FTP
     ftp = FTP(ftp_host)
@@ -142,13 +203,13 @@ def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.ni
     try:
         # Build path and find assembly directory
         base_path = build_ftp_path(database, accession_full)
-        print(f"  Base path: {base_path}")
+        logger.info(f"  Base path: {base_path}")
         
         assembly_dir = find_assembly_dir(ftp, base_path, accession_full)
-        print(f"  Assembly dir: {assembly_dir}")
+        logger.info(f"  Assembly dir: {assembly_dir}")
 
         s3_path = minio_path_prefix + build_accession_path(assembly_dir)
-        print(f"  S3 path: {s3_path}")
+        logger.info(f"  S3 path: {s3_path}")
         
         full_path = base_path + assembly_dir
         ftp.cwd(full_path)
@@ -157,38 +218,129 @@ def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.ni
         files = []
         ftp.retrlines('NLST', lambda x: files.append(x))
         
+        # Download and parse md5checksums.txt first
+        md5_checksums = {}
+        if 'md5checksums.txt' in files:
+            logger.info(f"  Downloading md5checksums.txt")
+            md5_content = []
+            ftp.retrlines('RETR md5checksums.txt', lambda x: md5_content.append(x))
+            md5_checksums = parse_md5checksums('\n'.join(md5_content))
+            logger.info(f"  Found {len(md5_checksums)} checksums")
+            
+            # Upload md5checksums.txt to MinIO
+            md5_local_file = local_dir / 'md5checksums.txt'
+            with open(md5_local_file, 'w') as f:
+                f.write('\n'.join(md5_content))
+            s3_client.upload_file(
+                minio_bucket,
+                s3_path + 'md5checksums.txt',
+                str(md5_local_file)
+            )
+            logger.info(f"  Uploaded md5checksums.txt to MinIO: {s3_path}md5checksums.txt")
+        else:
+            logger.warning(f"  WARNING: md5checksums.txt not found")
+        
         # Filter for files based on file_filters
         target_files = [f for f in files if any(f.endswith(suffix) for suffix in file_filters)]
         
         if not target_files:
-            print(f"  WARNING: No files matching filters found")
+            logger.warning(f"  WARNING: No files matching filters found")
             return
         
         # Download files
         for filename in target_files:
-            # First make sure the file does not already exist in MinIO
+            # Check if file exists in MinIO
             existing_objects = s3_client.list_objects(minio_bucket, prefix=s3_path + filename)
-            if existing_objects:
-                print(f"  Skipping existing file in MinIO: {filename}")
-                continue
-
+            file_exists = bool(existing_objects)
+            
             local_file = local_dir / filename
-            print(f"  Downloading: {filename}")
+            expected_checksum = md5_checksums.get(filename)
             
-            with open(local_file, 'wb') as f:
-                ftp.retrbinary(f'RETR {filename}', f.write)
+            # If file exists in MinIO and we have a checksum, verify it first
+            if file_exists and expected_checksum:
+                logger.info(f"  File exists in MinIO, verifying: {filename}")
+                # Download from MinIO to verify
+                s3_client.download_file(
+                    minio_bucket,
+                    s3_path + filename,
+                    str(local_file)
+                )
+                actual_checksum = compute_md5(local_file)
+                if actual_checksum == expected_checksum:
+                    logger.info(f"    ✓ Checksum verified, skipping: {actual_checksum}")
+                    continue
+                else:
+                    logger.warning(f"    ✗ Checksum mismatch in MinIO: expected {expected_checksum}, got {actual_checksum}")
+                    logger.info(f"    Will re-download from NCBI")
+            elif file_exists:
+                logger.info(f"  Skipping existing file in MinIO (no checksum available): {filename}")
+                no_checksum_files.append({
+                    'entry': entry,
+                    'filename': filename,
+                    'status': 'exists_in_minio'
+                })
+                continue
             
-            s3_client.upload_file(
-                minio_bucket,
-                s3_path + filename,
-                str(local_file)
-            )
-            print(f"    Uploaded to MinIO: {s3_path + filename}")
+            # Try up to 3 times
+            transfer_success = False
+            verified_checksum = False
+            for attempt in range(1, 4):
+                logger.info(f"  Downloading: {filename} (attempt {attempt}/3)")
+                
+                # Download from FTP
+                with open(local_file, 'wb') as f:
+                    ftp.retrbinary(f'RETR {filename}', f.write)
+                
+                # Verify checksum if available
+                if expected_checksum:
+                    actual_checksum = compute_md5(local_file)
+                    if actual_checksum != expected_checksum:
+                        logger.warning(f"    ✗ Checksum mismatch: expected {expected_checksum}, got {actual_checksum}")
+                        if attempt < 3:
+                            logger.info(f"    Retrying...")
+                            continue
+                        else:
+                            logger.error(f"    Failed after 3 attempts")
+                            failed_transfers.append({
+                                'entry': entry,
+                                'filename': filename,
+                                'reason': f'Checksum mismatch after 3 attempts (expected: {expected_checksum}, got: {actual_checksum})'
+                            })
+                            break
+                    else:
+                        logger.info(f"    ✓ Checksum verified: {actual_checksum}")
+                        verified_checksum = True
+                
+                # Upload to MinIO
+                s3_client.upload_file(
+                    minio_bucket,
+                    s3_path + filename,
+                    str(local_file)
+                )
+                logger.info(f"    Uploaded to MinIO: {s3_path + filename}")
+                transfer_success = True
+                break
+            
+            if transfer_success and not verified_checksum:
+                # No checksum available, upload anyway
+                logger.warning(f"    WARNING: No checksum available for verification")
+                s3_client.upload_file(
+                    minio_bucket,
+                    s3_path + filename,
+                    str(local_file)
+                )
+                logger.info(f"    Uploaded to MinIO: {s3_path + filename}")
+                no_checksum_files.append({
+                    'entry': entry,
+                    'filename': filename,
+                    'status': 'newly_uploaded'
+                })
+                transfer_success = True
         
-        print(f"  ✓ Downloaded {len(target_files)} files")
+        logger.info(f"  ✓ Downloaded {len(target_files)} files")
     
     except Exception as e:
-        print(f"  ✗ ERROR: {e}")
+        logger.error(f"  ✗ ERROR: {e}")
         raise
     
     finally:
@@ -196,7 +348,7 @@ def download_genome_files(entry, s3_client, local_dir, ftp_host='ftp.ncbi.nlm.ni
 
 
 def main():
-    if len(sys.argv) < 1:
+    if len(sys.argv) < 2:
         print("Usage: python download_genomes.py <accession_list_file>")
         print("\nExample: python download_genomes.py list_of_accessions.txt")
         sys.exit(1)
@@ -207,11 +359,15 @@ def main():
         print(f"Error: File not found: {input_file}")
         sys.exit(1)
     
+    # Set up logging
+    log_file = setup_logging()
+    logger.info(f"Logging to: {log_file}")
+    
     # Read accessions
     with open(input_file, 'r') as f:
         accessions = [line.strip() for line in f if line.strip()]
     
-    print(f"Found {len(accessions)} accessions to process")
+    logger.info(f"Found {len(accessions)} accessions to process")
 
     # Initialize MinIO client and check bucket/path
     s3 = get_minio_client()
@@ -222,29 +378,45 @@ def main():
     # Process each accession
     success_count = 0
     failed = []
+    failed_transfers = []  # Track individual file transfer failures
+    no_checksum_files = []  # Track files without checksums
     
     for i, entry in enumerate(accessions, 1):
         try:
-            print(f"\n[{i}/{len(accessions)}]", end=' ')
-            download_genome_files(entry, s3, temp_dir.name)
+            logger.info(f"\n[{i}/{len(accessions)}] {entry}")
+            download_genome_files(entry, s3, temp_dir.name, failed_transfers, no_checksum_files)
             success_count += 1
             time.sleep(0.5)  # Be nice to NCBI servers
         
         except Exception as e:
-            print(f"  ✗ FAILED: {entry}")
+            logger.error(f"  ✗ FAILED: {entry}")
             failed.append((entry, str(e)))
     
     # Summary
-    print("\n" + "="*60)
-    print(f"SUMMARY:")
-    print(f"  Total: {len(accessions)}")
-    print(f"  Success: {success_count}")
-    print(f"  Failed: {len(failed)}")
+    logger.info("\n" + "="*60)
+    logger.info(f"SUMMARY:")
+    logger.info(f"  Total: {len(accessions)}")
+    logger.info(f"  Success: {success_count}")
+    logger.info(f"  Failed: {len(failed)}")
+    logger.info(f"  Failed file transfers: {len(failed_transfers)}")
+    logger.info(f"  Files without checksums: {len(no_checksum_files)}")
     
     if failed:
-        print("\nFailed accessions:")
+        logger.error("\nFailed accessions:")
         for entry, error in failed:
-            print(f"  - {entry}: {error}")
+            logger.error(f"  - {entry}: {error}")
+    
+    if failed_transfers:
+        logger.warning("\nFailed file transfers (checksum verification):")
+        for transfer in failed_transfers:
+            logger.warning(f"  - {transfer['entry']} / {transfer['filename']}")
+            logger.warning(f"    Reason: {transfer['reason']}")
+    
+    if no_checksum_files:
+        logger.warning("\nFiles without checksums:")
+        for file_info in no_checksum_files:
+            status = "(existing)" if file_info['status'] == 'exists_in_minio' else "(newly uploaded)"
+            logger.warning(f"  - {file_info['entry']} / {file_info['filename']} {status}")
 
 
 if __name__ == '__main__':
