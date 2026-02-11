@@ -23,9 +23,13 @@ minio_path_prefix = "tenant-general-warehouse/kbase/datasets/ncbi/"
 # Set up logging
 logger = logging.getLogger(__name__)
 
-def setup_logging(log_file=None):
+def setup_logging(log_file=None, module_name=None):
     """
     Set up logging to file and console.
+    
+    Args:
+        log_file: Path to log file. If None, creates timestamped log file.
+        module_name: Logger name. If None, configures root logger (good for notebooks).
     """
     if log_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -45,11 +49,22 @@ def setup_logging(log_file=None):
     console_handler.setFormatter(formatter)
     
     # Configure logger
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # If no module_name specified, configure root logger (works for notebooks)
+    if module_name is None:
+        target_logger = logging.getLogger()
+    else:
+        target_logger = logging.getLogger(module_name)
+    
+    target_logger.setLevel(logging.DEBUG)
+    
+    # Clear any existing handlers to avoid duplicates
+    target_logger.handlers.clear()
+    
+    target_logger.addHandler(file_handler)
+    target_logger.addHandler(console_handler)
     
     return log_file
+
 
 def get_minio_client():
     """
@@ -449,7 +464,7 @@ Examples:
         parser.error('--output-list can only be used with --prefix')
     
     # Set up logging
-    log_file = setup_logging()
+    log_file = setup_logging(module_name=__name__)
     logger.info(f"Logging to: {log_file}")
     
     # Determine mode and get list of items to process
