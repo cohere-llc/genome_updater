@@ -192,7 +192,7 @@ def parse_md5checksums(content):
     return checksums
 
 
-def find_assembly_directories_in_prefix(ftp, prefix_path, ftp_host='ftp.ncbi.nlm.nih.gov'):
+def find_assembly_directories_in_prefix(ftp, prefix_path):
     """
     Recursively find all assembly directories under a given prefix.
     Returns list of full paths to assembly directories.
@@ -481,7 +481,7 @@ Examples:
         ftp.login()
         
         try:
-            assembly_paths = find_assembly_directories_in_prefix(ftp, ftp_path, args.ftp_host)
+            assembly_paths = find_assembly_directories_in_prefix(ftp, ftp_path)
             logger.info(f"Found {len(assembly_paths)} assembly directories")
         finally:
             ftp.quit()
