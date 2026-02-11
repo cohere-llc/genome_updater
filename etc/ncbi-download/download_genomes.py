@@ -12,6 +12,7 @@ import time
 import tempfile
 import hashlib
 import logging
+import argparse
 from datetime import datetime
 
 from minio_client import MinioClient
@@ -72,20 +73,28 @@ def get_minio_client():
 
 def parse_accession(entry):
     """
-    Parse entry like 'GB_GCA_000195005.1' or 'RS_GCF_000006825.1'
+    Parse entry like 'GB_GCA_000195005.1' or 'RS_GCF_000006825.1' or 'GCA_000195005.1'
     Returns: (prefix, database, accession_full)
     e.g., ('GB', 'GCA', 'GCA_000195005.1')
     """
+    # Try full format first (GB_GCA_000195005.1)
     match = re.match(r'(GB|RS)_(GC[AF])_([\d.]+)', entry.strip())
-    if not match:
-        raise ValueError(f"Invalid entry format: {entry}")
+    if match:
+        prefix = match.group(1)
+        database = match.group(2)  # GCA or GCF
+        accession_num = match.group(3)
+        accession_full = f"{database}_{accession_num}"
+        return prefix, database, accession_full
     
-    prefix = match.group(1)
-    database = match.group(2)  # GCA or GCF
-    accession_num = match.group(3)
-    accession_full = f"{database}_{accession_num}"
+    # Try accession-only format (GCA_000195005.1)
+    match = re.match(r'(GC[AF])_([\d.]+)', entry.strip())
+    if match:
+        database = match.group(1)
+        accession_num = match.group(2)
+        accession_full = f"{database}_{accession_num}"
+        return None, database, accession_full
     
-    return prefix, database, accession_full
+    raise ValueError(f"Invalid entry format: {entry}")
 
 
 def build_ftp_path(database, accession_full):
@@ -183,11 +192,67 @@ def parse_md5checksums(content):
     return checksums
 
 
-def download_genome_files(entry, s3_client, local_dir, failed_transfers, no_checksum_files, ftp_host='ftp.ncbi.nlm.nih.gov'):
+def find_assembly_directories_in_prefix(ftp, prefix_path, ftp_host='ftp.ncbi.nlm.nih.gov'):
+    """
+    Recursively find all assembly directories under a given prefix.
+    Returns list of full paths to assembly directories.
+    e.g., /genomes/all/GCF/000/001/215/GCF_000001215.2_Release_5/
+    """
+    assembly_pattern = re.compile(r'^GC[AF]_\d{9}\.\d+_.*')
+    assembly_dirs = []
+    
+    def traverse_directory(path):
+        logger.debug(f"Traversing: {path}")
+        try:
+            ftp.cwd(path)
+            items = []
+            ftp.retrlines('LIST', lambda x: items.append(x))
+            
+            for line in items:
+                parts = line.split()
+                if len(parts) < 9:
+                    continue
+                    
+                name = parts[-1]
+                is_dir = line.startswith('d')
+                
+                if not is_dir:
+                    continue
+                
+                # Check if this is an assembly directory
+                if assembly_pattern.match(name):
+                    full_path = f"{path}{name}/"
+                    assembly_dirs.append(full_path)
+                    logger.debug(f"  Found assembly: {full_path}")
+                else:
+                    # Recurse into subdirectory
+                    traverse_directory(f"{path}{name}/")
+        
+        except Exception as e:
+            logger.warning(f"Error traversing {path}: {e}")
+    
+    traverse_directory(prefix_path)
+    return assembly_dirs
+
+
+def download_genome_files(entry, s3_client, local_dir, failed_transfers, no_checksum_files, ftp_host='ftp.ncbi.nlm.nih.gov', assembly_path=None):
     """
     Download files according to file_filters for a given accession.
+    If assembly_path is provided, use it directly instead of building from entry.
     """
-    _, database, accession_full = parse_accession(entry)
+    if assembly_path:
+        # Extract database and accession from path
+        # e.g., /genomes/all/GCF/000/001/215/GCF_000001215.2_Release_5/
+        match = re.search(r'/(GC[AF])/\d{3}/\d{3}/\d{3}/((GC[AF]_\d{9}\.\d+)_[^/]+)/', assembly_path)
+        if not match:
+            raise ValueError(f"Cannot parse assembly path: {assembly_path}")
+        database = match.group(1)
+        assembly_dir = match.group(2)
+        accession_full = match.group(3)
+        base_path = assembly_path.rsplit('/', 2)[0] + '/'
+        entry = accession_full  # Use accession as entry for logging
+    else:
+        _, database, accession_full = parse_accession(entry)
     
     # Ensure local_dir is a Path object
     local_dir = Path(local_dir)
@@ -201,12 +266,15 @@ def download_genome_files(entry, s3_client, local_dir, failed_transfers, no_chec
     ftp.login()
     
     try:
-        # Build path and find assembly directory
-        base_path = build_ftp_path(database, accession_full)
-        logger.info(f"  Base path: {base_path}")
-        
-        assembly_dir = find_assembly_dir(ftp, base_path, accession_full)
-        logger.info(f"  Assembly dir: {assembly_dir}")
+        # Build path and find assembly directory (if not already provided)
+        if not assembly_path:
+            base_path = build_ftp_path(database, accession_full)
+            logger.info(f"  Base path: {base_path}")
+            
+            assembly_dir = find_assembly_dir(ftp, base_path, accession_full)
+            logger.info(f"  Assembly dir: {assembly_dir}")
+        else:
+            logger.info(f"  Using provided path: {assembly_path}")
 
         s3_path = minio_path_prefix + build_accession_path(assembly_dir)
         logger.info(f"  S3 path: {s3_path}")
@@ -348,26 +416,92 @@ def download_genome_files(entry, s3_client, local_dir, failed_transfers, no_chec
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python download_genomes.py <accession_list_file>")
-        print("\nExample: python download_genomes.py list_of_accessions.txt")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Download genome files from NCBI to MinIO',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Download from accession list file
+  python download_genomes.py list_of_accessions.txt
+  
+  # Download all genomes under a prefix
+  python download_genomes.py --prefix GCF
+  python download_genomes.py --prefix GCF/000/001
+  python download_genomes.py --prefix GCA/000
+        """
+    )
     
-    input_file = sys.argv[1]
+    parser.add_argument('input_file', nargs='?', help='File with list of accessions')
+    parser.add_argument('--prefix', help='FTP prefix to download all genomes from (e.g., GCF, GCF/000/001)')
+    parser.add_argument('--output-list', help='Output file to save list of assemblies found (use with --prefix)')
+    parser.add_argument('--ftp-host', default='ftp.ncbi.nlm.nih.gov', help='FTP host (default: ftp.ncbi.nlm.nih.gov)')
     
-    if not os.path.exists(input_file):
-        print(f"Error: File not found: {input_file}")
-        sys.exit(1)
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.input_file and not args.prefix:
+        parser.error('Either provide an input file or use --prefix')
+    
+    if args.input_file and args.prefix:
+        parser.error('Cannot use both input file and --prefix at the same time')
+    
+    if args.output_list and not args.prefix:
+        parser.error('--output-list can only be used with --prefix')
     
     # Set up logging
     log_file = setup_logging()
     logger.info(f"Logging to: {log_file}")
     
-    # Read accessions
-    with open(input_file, 'r') as f:
-        accessions = [line.strip() for line in f if line.strip()]
+    # Determine mode and get list of items to process
+    accessions = []
+    assembly_paths = []
     
-    logger.info(f"Found {len(accessions)} accessions to process")
+    if args.input_file:
+        # File-based mode
+        if not os.path.exists(args.input_file):
+            print(f"Error: File not found: {args.input_file}")
+            sys.exit(1)
+        
+        with open(args.input_file, 'r') as f:
+            accessions = [line.strip() for line in f if line.strip()]
+        
+        logger.info(f"Mode: File-based")
+        logger.info(f"Found {len(accessions)} accessions to process")
+    
+    else:
+        # Prefix-based mode
+        prefix = args.prefix.strip('/')
+        ftp_path = f"/genomes/all/{prefix}/"
+        
+        logger.info(f"Mode: Prefix-based")
+        logger.info(f"Searching for assemblies under: {ftp_path}")
+        
+        # Connect to FTP and find all assembly directories
+        ftp = FTP(args.ftp_host)
+        ftp.login()
+        
+        try:
+            assembly_paths = find_assembly_directories_in_prefix(ftp, ftp_path, args.ftp_host)
+            logger.info(f"Found {len(assembly_paths)} assembly directories")
+        finally:
+            ftp.quit()
+        
+        if not assembly_paths:
+            logger.error(f"No assembly directories found under {ftp_path}")
+            sys.exit(1)
+        
+        # Save assembly list to file if requested
+        if args.output_list:
+            logger.info(f"Saving assembly list to: {args.output_list}")
+            with open(args.output_list, 'w') as f:
+                for path in assembly_paths:
+                    # Extract accession from path
+                    # e.g., /genomes/all/GCF/000/001/215/GCF_000001215.2_Release_5/ -> GCF_000001215.2
+                    match = re.search(r'/(GC[AF]_\d{9}\.\d+)_[^/]+/', path)
+                    if match:
+                        accession = match.group(1)
+                        f.write(accession + '\n')
+            logger.info(f"Saved {len(assembly_paths)} accessions to {args.output_list}")
 
     # Initialize MinIO client and check bucket/path
     s3 = get_minio_client()
@@ -375,16 +509,27 @@ def main():
     # Create a temporary folder for downloads
     temp_dir = tempfile.TemporaryDirectory()
     
-    # Process each accession
+    # Process each accession or assembly path
     success_count = 0
     failed = []
     failed_transfers = []  # Track individual file transfer failures
     no_checksum_files = []  # Track files without checksums
     
-    for i, entry in enumerate(accessions, 1):
+    items_to_process = accessions if accessions else assembly_paths
+    
+    for i, entry in enumerate(items_to_process, 1):
         try:
-            logger.info(f"\n[{i}/{len(accessions)}] {entry}")
-            download_genome_files(entry, s3, temp_dir.name, failed_transfers, no_checksum_files)
+            logger.info(f"\n[{i}/{len(items_to_process)}] {entry}")
+            
+            if assembly_paths:
+                # Prefix mode: entry is an assembly path
+                download_genome_files(entry, s3, temp_dir.name, failed_transfers, no_checksum_files, 
+                                     ftp_host=args.ftp_host, assembly_path=entry)
+            else:
+                # File mode: entry is an accession from the file
+                download_genome_files(entry, s3, temp_dir.name, failed_transfers, no_checksum_files,
+                                     ftp_host=args.ftp_host)
+            
             success_count += 1
             time.sleep(0.5)  # Be nice to NCBI servers
         
@@ -395,7 +540,7 @@ def main():
     # Summary
     logger.info("\n" + "="*60)
     logger.info(f"SUMMARY:")
-    logger.info(f"  Total: {len(accessions)}")
+    logger.info(f"  Total: {len(items_to_process)}")
     logger.info(f"  Success: {success_count}")
     logger.info(f"  Failed: {len(failed)}")
     logger.info(f"  Failed file transfers: {len(failed_transfers)}")
